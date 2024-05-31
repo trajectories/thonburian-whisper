@@ -1,6 +1,7 @@
 import argparse
 import torch
 import pandas as pd
+import os
 from datasets import Audio, Dataset
 from transformers import pipeline
 from transformers.pipelines.pt_utils import KeyDataset
@@ -28,23 +29,31 @@ def main(args):
         device=device,
         torch_dtype=torch.float16,
     )
-    
-    if args.input_file.endswith('.mp4'):
-        wav_file = convert_mp4_to_wav(args.input_file)
-    elif args.input_file.endswith('.wav'):
-        # Check sampling rate and convert if necessary
-        audio = AudioSegment.from_wav(args.input_file)
-        if audio.frame_rate != SAMPLING_RATE:
-            wav_file = convert_audio_to_wav(args.input_file, SAMPLING_RATE)
-        else:
-            wav_file = args.input_file
-    else:  # Assuming other audio formats such as .mp3, etc.
-        wav_file = convert_audio_to_wav(args.input_file, SAMPLING_RATE)
 
-    _, chunklist = perform_vad(wav_file, 'temp_directory_for_chunks')
+    audio_files = [os.path.join(args.input_folder, f) for f in os.listdir(args.input_folder) if f.endswith(('.mp4', '.wav', '.mp3'))]
     
+    all_predictions = []
+    all_chunks = []
+
+    for audio_file in audio_files:
+        if audio_file.endswith('.mp4'):
+            wav_file = convert_mp4_to_wav(audio_file)
+        elif audio_file.endswith('.wav'):
+            # Check sampling rate and convert if necessary
+            audio = AudioSegment.from_wav(audio_file)
+            if audio.frame_rate != SAMPLING_RATE:
+                wav_file = convert_audio_to_wav(audio_file, SAMPLING_RATE)
+            else:
+                wav_file = audio_file
+        else:  # Assuming other audio formats such as .mp3, etc.
+            wav_file = convert_audio_to_wav(audio_file, SAMPLING_RATE)
+
+        _, chunklist = perform_vad(wav_file, 'temp_directory_for_chunks')
+        
+        all_chunks.extend(chunklist)
+
     # for faster inference, create dataset
-    audio_dataset = Dataset.from_dict({"audio": [c["fname"] for c in chunklist]}).cast_column("audio", Audio())
+    audio_dataset = Dataset.from_dict({"audio": [c["fname"] for c in all_chunks]}).cast_column("audio", Audio())
 
     prediction_gen = pipe(
         KeyDataset(audio_dataset, "audio"),
@@ -58,7 +67,7 @@ def main(args):
 
     vad_transcriptions = {"start": [], "end": [], "prediction": []}
 
-    for vad_chunk, pred in zip(chunklist, predictions):
+    for vad_chunk, pred in zip(all_chunks, predictions):
         start_in_samples, end_in_samples = vad_chunk["start"], vad_chunk["end"]
         start_in_s = start_in_samples / (SAMPLING_RATE)
         end_in_s = end_in_samples / (SAMPLING_RATE)
@@ -80,7 +89,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ASR pipeline with options")
-    parser.add_argument("--input_file", required=True, help="Input video or audio file path")
+    parser.add_argument("--input_folder", required=True, help="Input folder path containing audio files")
     parser.add_argument("--output_file", required=True, help="Output file path (CSV or SRT based on the format specified)")
     parser.add_argument("--model_path", default='/path/to/default/model', help="Path to the whisper model")
     parser.add_argument("--output_format", choices=['csv', 'srt'], default='csv', help="Output format, either csv or srt")
