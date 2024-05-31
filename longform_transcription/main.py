@@ -31,9 +31,6 @@ def main(args):
     )
 
     audio_files = [os.path.join(args.input_folder, f) for f in os.listdir(args.input_folder) if f.endswith(('.mp4', '.wav', '.mp3'))]
-    
-    all_predictions = []
-    all_chunks = []
 
     for audio_file in audio_files:
         if audio_file.endswith('.mp4'):
@@ -49,48 +46,49 @@ def main(args):
             wav_file = convert_audio_to_wav(audio_file, SAMPLING_RATE)
 
         _, chunklist = perform_vad(wav_file, 'temp_directory_for_chunks')
-        
-        all_chunks.extend(chunklist)
 
-    # for faster inference, create dataset
-    audio_dataset = Dataset.from_dict({"audio": [c["fname"] for c in all_chunks]}).cast_column("audio", Audio())
+        # for faster inference, create dataset
+        audio_dataset = Dataset.from_dict({"audio": [c["fname"] for c in chunklist]}).cast_column("audio", Audio())
 
-    prediction_gen = pipe(
-        KeyDataset(audio_dataset, "audio"),
-        generate_kwargs={"task": "transcribe", "language": "Thai"},
-        return_timestamps=False,
-        batch_size=4,
-        ignore_warning=True,
-    )
+        prediction_gen = pipe(
+            KeyDataset(audio_dataset, "audio"),
+            generate_kwargs={"task": "transcribe", "language": "Thai"},
+            return_timestamps=False,
+            batch_size=4,
+            ignore_warning=True,
+        )
 
-    predictions = [out for out in prediction_gen]
+        predictions = [out for out in prediction_gen]
 
-    vad_transcriptions = {"start": [], "end": [], "prediction": []}
+        vad_transcriptions = {"start": [], "end": [], "prediction": []}
 
-    for vad_chunk, pred in zip(all_chunks, predictions):
-        start_in_samples, end_in_samples = vad_chunk["start"], vad_chunk["end"]
-        start_in_s = start_in_samples / (SAMPLING_RATE)
-        end_in_s = end_in_samples / (SAMPLING_RATE)
+        for vad_chunk, pred in zip(chunklist, predictions):
+            start_in_samples, end_in_samples = vad_chunk["start"], vad_chunk["end"]
+            start_in_s = start_in_samples / (SAMPLING_RATE)
+            end_in_s = end_in_samples / (SAMPLING_RATE)
 
-        vad_transcriptions["prediction"].append(pred["text"])
-        vad_transcriptions["start"].append(start_in_s)
-        vad_transcriptions["end"].append(end_in_s)
+            vad_transcriptions["prediction"].append(pred["text"])
+            vad_transcriptions["start"].append(start_in_s)
+            vad_transcriptions["end"].append(end_in_s)
 
-    ss = SyllableSegmentation()
-    uncorrected_segments = ss(vad_transcriptions=vad_transcriptions, segment_duration=4.0)
+        ss = SyllableSegmentation()
+        uncorrected_segments = ss(vad_transcriptions=vad_transcriptions, segment_duration=4.0)
 
-    if args.output_format == 'csv':
-        df = pd.DataFrame(uncorrected_segments)
-        df.to_csv(args.output_file, index=False)
-    elif args.output_format == 'srt':
-        generate_srt(uncorrected_segments, args.output_file)
-        if args.burn_srt:
-            burn_srt_to_video(args.input_file, args.output_file)
+        base_filename = os.path.splitext(os.path.basename(audio_file))[0]
+        output_file = f"{args.output_folder}/{base_filename}.{args.output_format}"
+
+        if args.output_format == 'csv':
+            df = pd.DataFrame(uncorrected_segments)
+            df.to_csv(output_file, index=False)
+        elif args.output_format == 'srt':
+            generate_srt(uncorrected_segments, output_file)
+            if args.burn_srt:
+                burn_srt_to_video(audio_file, output_file)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ASR pipeline with options")
     parser.add_argument("--input_folder", required=True, help="Input folder path containing audio files")
-    parser.add_argument("--output_file", required=True, help="Output file path (CSV or SRT based on the format specified)")
+    parser.add_argument("--output_folder", required=True, help="Output folder path to save the results")
     parser.add_argument("--model_path", default='/path/to/default/model', help="Path to the whisper model")
     parser.add_argument("--output_format", choices=['csv', 'srt'], default='csv', help="Output format, either csv or srt")
     parser.add_argument("--burn_srt", action='store_true', help="Option to burn the srt to the input video (only works if output_format is srt)")
